@@ -47,6 +47,7 @@ namespace GalaxyExtract
         private string outputPath;
         private string sectorPath;
         private byte[] searchPattern;
+        private byte[] starClassPattern;
 
         IModApi modApi;
 
@@ -107,7 +108,13 @@ namespace GalaxyExtract
 
                     if (sectors?.SolarSystems != null && sectors.SolarSystems.Count > 0)
                     {
-                        return sectors.SolarSystems[0].Name;
+                        var first = sectors.SolarSystems[0];
+                        if (!string.IsNullOrEmpty(first.StarClass))
+                        {
+                            starClassPattern = Encoding.ASCII.GetBytes(first.StarClass);
+                            modApi.Log(string.Format("GalaxyExtractor: StarClass pattern set to '{0}'", first.StarClass));
+                        }
+                        return first.Name;
                     }
                 }
 
@@ -348,6 +355,8 @@ namespace GalaxyExtract
                         var star = GetStarEntry((float*)ptr);
                         if (star != null)
                         {
+                            if (stars.Count == 0)
+                                DiscoverAndLogStarClassOffset(ptr);
                             stars.Add(star.Value);
                             consecutiveFailures = 0;
                         }
@@ -415,6 +424,85 @@ namespace GalaxyExtract
             {
                 return null;
             }
+        }
+
+        private unsafe void DiscoverAndLogStarClassOffset(byte* structStart)
+        {
+            if (starClassPattern == null || starClassPattern.Length == 0)
+            {
+                modApi.Log("GalaxyExtractor: No StarClass pattern to search for");
+                return;
+            }
+
+            // Phase 1: wide string search — StarClass may live far from the struct
+            const int searchBefore = 4096;
+            const int searchAfter = 4096;
+
+            for (int offset = -searchBefore; offset < searchAfter; offset++)
+            {
+                bool match = true;
+                for (int i = 0; i < starClassPattern.Length; i++)
+                {
+                    if (*(structStart + offset + i) != starClassPattern[i])
+                    {
+                        match = false;
+                        break;
+                    }
+                }
+
+                if (match)
+                {
+                    modApi.Log(string.Format(
+                        "GalaxyExtractor: StarClass '{0}' found at offset {1} from struct start",
+                        Encoding.ASCII.GetString(starClassPattern), offset));
+
+                    // Check for a ushort length prefix 2 bytes before (same pattern as name field)
+                    if (offset >= 2)
+                    {
+                        ushort possibleLen = *(ushort*)(structStart + offset - 2);
+                        modApi.Log(string.Format(
+                            "GalaxyExtractor:   Possible length prefix at offset {0}: {1}",
+                            offset - 2, possibleLen));
+                    }
+                    return;
+                }
+            }
+
+            modApi.Log(string.Format(
+                "GalaxyExtractor: StarClass string not found within -{0}/+{1} bytes — not stored as inline string near struct",
+                searchBefore, searchAfter));
+
+            // Phase 2: dump first 5 entries so we can compare non-name bytes across different StarClass values
+            // Beta (FStartingSystem) starts at offset 48, Delta at 96, etc.
+            // If any bytes in the "padding" zone (after name, before next entry) differ between entries,
+            // that position holds StarClass data (likely as a pointer or integer)
+            const int entriesToDump = 5;
+            var sb = new StringBuilder();
+            sb.AppendLine();
+            for (int entry = 0; entry < entriesToDump; entry++)
+            {
+                int entryBase = entry * STAR_ENTRY_SIZE;
+                ushort nameLen = *(ushort*)(structStart + entryBase + STAR_NAME_LENGTH_OFFSET);
+                string entryName = "?";
+                if (nameLen >= MIN_STAR_NAME_LENGTH && nameLen <= MAX_STAR_NAME_LENGTH)
+                {
+                    byte[] nb = new byte[nameLen];
+                    Marshal.Copy((IntPtr)(structStart + entryBase + STAR_NAME_OFFSET), nb, 0, nameLen);
+                    entryName = Encoding.ASCII.GetString(nb);
+                }
+
+                sb.AppendFormat("  Entry {0} ({1}):\n", entry, entryName);
+                for (int i = 0; i < STAR_ENTRY_SIZE; i++)
+                {
+                    if (i % 16 == 0)
+                        sb.AppendFormat("    [{0,2}]: ", i);
+                    sb.AppendFormat("{0:X2} ", *(structStart + entryBase + i));
+                    if (i % 16 == 15)
+                        sb.AppendLine();
+                }
+                sb.AppendLine();
+            }
+            modApi.Log(string.Format("GalaxyExtractor: First {0} entries (48 bytes each):{1}", entriesToDump, sb));
         }
 
         private unsafe bool GetNextMemoryRegion(ref Kernel32.MEMORY_BASIC_INFORMATION memInfo,
@@ -554,6 +642,7 @@ namespace GalaxyExtract
         private class SolarSystem
         {
             public string Name { get; set; }
+            public string StarClass { get; set; }
         }
 
         private static class Kernel32
