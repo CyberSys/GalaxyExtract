@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//c/Program Files \\(x86\\)/Steam/steamapps/common/Empyrion - Galactic Survival/Saves/Games/Reforged Eden 2 Beta SP/Content/Configuration/**)"
+    ]
+  }
+}
